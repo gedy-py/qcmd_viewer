@@ -2,6 +2,8 @@
 
 This project provides a user-friendly Streamlit application for visualizing and analyzing Quartz Crystal Microbalance with Dissipation monitoring (QCM-D) data. QCM-D Viewer simplifies the exploration of frequency (Δf) and dissipation (ΔD) shifts across multiple harmonics, allowing detailed inspection of experimental results in real time.
 
+Link to the Streamlit application : https://qcmdviewer.streamlit.app/
+
 ## Key features:
 - Multi-harmonic selection: Easily choose which overtones to display for both frequency and dissipation signals.
 - Customizable plots: Adjust axes limits, time ranges, figure size, resolution, and smoothing options (Savitzky-Golay filter).
