@@ -141,7 +141,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("QCM-D Viewer")
-
+st.markdown(
+    "📂 [Repo GitHub & Sample QCM-D dataset](https://github.com/gedy-py/qcmd_viewer)",
+    unsafe_allow_html=False
+)
 uploaded_file = st.file_uploader(
     "Upload a CSV/Excel file",
     type=["csv","xlsx"]
