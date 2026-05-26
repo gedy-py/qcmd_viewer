@@ -143,8 +143,8 @@ st.markdown("""
 st.title("QCM-D Viewer")
 
 st.markdown(
-    '<p style="margin-top:-10px; color:gray; font-size:0.9em;">'
-    '📂 Repo GitHub & fichier exemple : '
+    '<p style="margin-top:-10px; color:gray; font-size:0.9em; font-style:italic;">'
+    '📂 GitHub Repo & Sample QCM-D dataset : '
     '<a href="https://github.com/gedy-py/qcmd_viewer" target="_blank">'
     'github.com/gedy-py/qcmd_viewer</a></p>',
     unsafe_allow_html=True
