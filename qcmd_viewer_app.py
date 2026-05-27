@@ -30,11 +30,11 @@ def hhmm_to_seconds(hhmm):
         return None
     parts = hhmm.strip().split(":")
     if len(parts) != 2:
-        raise ValueError(f"Format invalide '{hhmm}' — attendu hh:mm")
+        raise ValueError(f"Invalid format '{hhmm}' — expected hh:mm")
     try:
         h, m = int(parts[0]), int(parts[1])
     except ValueError:
-        raise ValueError(f"Format invalide '{hhmm}' — attendu hh:mm")
+        raise ValueError(f"Invalid format '{hhmm}' — expected hh:mm")
     return h * 3600 + m * 60
 
 def load_qcmd_data(uploaded_file):
@@ -43,7 +43,7 @@ def load_qcmd_data(uploaded_file):
     elif uploaded_file.name.lower().endswith((".xls", ".xlsx")):
         df = pd.read_excel(uploaded_file)
     else:
-        raise ValueError("Format non supporté (CSV ou XLSX attendu).")
+        raise ValueError("Unsupported format (CSV or XLSX expected).")
 
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -54,7 +54,7 @@ def load_qcmd_data(uploaded_file):
             time_col = c
             break
     if time_col is None:
-        raise KeyError(f"Aucune colonne temps détectée. Colonnes : {df.columns.tolist()}")
+        raise KeyError(f"No time column detected. Available columns: {df.columns.tolist()}")
 
     df = df.rename(columns={time_col: "Time [s]"})
     return df
@@ -109,8 +109,8 @@ def plot_qcmd(df, freq_selection, diss_selection, smooth=False, window_length=21
         effective_window = max(effective_window, 3)  # minimum absolu
         if effective_window != window_length:
             st.warning(
-                f"⚠️ Window length ajusté de {window_length} à {effective_window} "
-                f"car la fenêtre temporelle ne contient que {n_points} points."
+                f"⚠️ Window length adjusted from {window_length} to {effective_window} "
+                f"because the selected time range only contains {n_points} data points."
             )
 
     if has_freq:
