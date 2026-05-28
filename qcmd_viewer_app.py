@@ -167,8 +167,8 @@ def plot_qcmd(df, freq_selection, diss_selection, smooth=False, window_length=21
 
         text = step["text"]
         ax1.text(
-            df_plot["Time_dt"].iloc[0] + timedelta(seconds=(step["start"] + step["stop"]) / 2),
-            text_position_z_value,  # [FIX 2] maintenant un vrai paramètre, pas une globale
+            datetime(1900, 1, 1) + timedelta(seconds=(step["start"] + step["stop"]) / 2),
+            text_position_z_value,
             text,
             color='black', ha='center', fontsize='small'
         )
