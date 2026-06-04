@@ -1,6 +1,8 @@
-streamlit
+streamlit>=1.35
 pandas
 numpy
-matplotlib
 scipy
 openpyxl
+plotly>=5.18
+kaleido
+ 
