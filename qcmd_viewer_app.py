@@ -24,8 +24,6 @@ def hhmm_to_seconds(hhmm):
     Lève ValueError si le format est invalide.
     Retourne None si la chaîne est vide.
     """
-    # [FIX 4] On sépare le cas "vide" (retourne None) du cas "invalide" (lève une erreur)
-    # afin de pouvoir donner un feedback précis à l'utilisateur.
     if not hhmm or not hhmm.strip():
         return None
     parts = hhmm.strip().split(":")
@@ -70,9 +68,7 @@ def detect_harmonics(df):
 def plot_qcmd(df, freq_selection, diss_selection, smooth=False, window_length=21, polyorder=1,
               t_min=None, t_max=None, freq_limits=None, diss_limits=None,
               title="QCM-D", legend_right=False, figsize=(10, 6), dpi=120, steps=None,
-              # [FIX 2] text_position_z_value est maintenant un paramètre explicite de la fonction
-              # au lieu d'être une variable globale capturée implicitement.
-              text_position_z_value=0):
+              text_position_z_value=None):
 
     if steps is None:
         steps = []
@@ -94,10 +90,6 @@ def plot_qcmd(df, freq_selection, diss_selection, smooth=False, window_length=21
     has_freq = len(freq_selection) > 0
     has_diss = len(diss_selection) > 0
 
-    # [FIX 3] On calcule la taille réelle des données APRÈS le filtrage temporel,
-    # puis on ajuste window_length pour qu'il reste inférieur à n_points et
-    # supérieur à polyorder. Sans ça, savgol_filter lève un ValueError si
-    # la fenêtre temporelle choisie contient trop peu de points.
     n_points = len(df_plot)
     effective_window = window_length
     if smooth and n_points > 0:
@@ -157,20 +149,24 @@ def plot_qcmd(df, freq_selection, diss_selection, smooth=False, window_length=21
         else:
             ax1.legend(lines, labels, loc='best')
             plt.tight_layout()
+            
+    if text_position_z_value is None:
+        text_position_z_value = ax1.get_ylim()[1]
 
     for step in steps:
         start_dt = datetime(1900, 1, 1) + timedelta(seconds=step["start"])
-        stop_dt = datetime(1900, 1, 1) + timedelta(seconds=step["stop"])
+        stop_dt  = datetime(1900, 1, 1) + timedelta(seconds=step["stop"])
 
         ax1.axvline(start_dt, linestyle=':', linewidth=0.75, color='black')
-        ax1.axvline(stop_dt, linestyle=':', linewidth=0.75, color='black')
+        ax1.axvline(stop_dt,  linestyle=':', linewidth=0.75, color='black')
 
         text = step["text"]
+        text_x = datetime(1900, 1, 1) + timedelta(seconds=(step["start"] + step["stop"]) / 2)
         ax1.text(
-            datetime(1900, 1, 1) + timedelta(seconds=(step["start"] + step["stop"]) / 2),
+            text_x,
             text_position_z_value,
             text,
-            color='black', ha='center', fontsize='small'
+            color='black', ha='center', va='top', fontsize='small'
         )
 
     plt.title(title)
@@ -251,7 +247,8 @@ if uploaded_file:
     with st.sidebar.expander("Experimental steps visualisation"):
         add_step = st.checkbox("Add experimental step(s)")
         steps = []
-        text_position_z_value = 0  # [FIX 2] valeur par défaut définie inconditionnellement
+        text_position_z_value = None
+
         if add_step:
             num_steps = st.number_input("Number of steps", 1, 10, 1)
 
@@ -259,7 +256,7 @@ if uploaded_file:
                 with st.expander(f"Step {i + 1}"):
                     text = st.text_input(f"Step {i + 1} name", "", placeholder=f"Step {i + 1}", key=f"text_{i}")
                     start_hhmm = st.text_input(f"Start time", "", placeholder="00:00", key=f"start_{i}")
-                    stop_hhmm = st.text_input(f"Stop time", "", placeholder="00:05", key=f"stop_{i}")
+                    stop_hhmm  = st.text_input(f"Stop time",  "", placeholder="00:05", key=f"stop_{i}")
 
                     try:
                         start_sec = hhmm_to_seconds(start_hhmm) or 0
@@ -279,16 +276,27 @@ if uploaded_file:
                     })
 
             text_position_z = st.text_input(
-                "Step names position (relative to the left axis)", "",
-                placeholder="by default : 0"
+                "Step label Y position (left axis)",
+                "",
+                placeholder="default: top of left axis"
             )
-            # [FIX 2] text_position_z_value toujours défini, ici on l'écrase si l'input est valide
+
             if text_position_z:
                 try:
                     text_position_z_value = float(text_position_z)
                 except ValueError:
-                    st.warning("Step names position — valeur numérique attendue.")
-                    text_position_z_value = 0
+                    st.warning("Step label Y position — a numeric value is expected.")
+                    text_position_z_value = None
+
+            has_freq_selected = len(freq_selection) > 0
+            has_diss_selected = len(diss_selection) > 0
+            if has_freq_selected and has_diss_selected:
+                st.info("ℹ️ Step label Y position is in **Hz** (left axis: frequency). "
+                        "If you switch to dissipation only, units will change to ppm.")
+            elif has_diss_selected and not has_freq_selected:
+                st.info("ℹ️ Step label Y position is in **ppm** (left axis: dissipation — only axis shown).")
+            elif has_freq_selected and not has_diss_selected:
+                st.info("ℹ️ Step label Y position is in **Hz** (left axis: frequency — only axis shown).")
 
     with st.sidebar.expander("Smoothing"):
         smooth = st.checkbox("Enable smoothing (Savitzky-Golay)", value=False)
@@ -299,49 +307,48 @@ if uploaded_file:
         figsize_input = st.text_input("Size (width,height)", "", placeholder="by default : 10,6")
         dpi_input = st.text_input("Resolution (dpi)", "", placeholder="by default : 120")
 
-    # [FIX 4] Parsing avec feedback utilisateur explicite pour chaque champ
     t_min = None
     if t_min_input:
         try:
             t_min = hhmm_to_seconds(t_min_input)
         except ValueError as e:
-            st.warning(f"Start time invalide — {e}")
+            st.warning(f"Start time — {e}")
 
     t_max = None
     if t_max_input:
         try:
             t_max = hhmm_to_seconds(t_max_input)
         except ValueError as e:
-            st.warning(f"End time invalide — {e}")
+            st.warning(f"End time — {e}")
 
     freq_limits = None
     if freq_limits_input:
         try:
             parts = freq_limits_input.split(",")
             if len(parts) != 2:
-                raise ValueError("attendu deux valeurs séparées par une virgule")
+                raise ValueError("expected two values separated by a comma")
             freq_limits = tuple(map(float, parts))
         except ValueError as e:
-            st.warning(f"Δf axis limits invalide — {e}")
+            st.warning(f"Δf axis limits — {e}")
 
     diss_limits = None
     if diss_limits_input:
         try:
             parts = diss_limits_input.split(",")
             if len(parts) != 2:
-                raise ValueError("attendu deux valeurs séparées par une virgule")
+                raise ValueError("expected two values separated by a comma")
             diss_limits = tuple(map(float, parts))
         except ValueError as e:
-            st.warning(f"ΔD axis limits invalide — {e}")
+            st.warning(f"ΔD axis limits — {e}")
 
     figsize = (10, 6)
     if figsize_input:
         try:
             figsize = tuple(map(float, figsize_input.split(",")))
             if len(figsize) != 2:
-                raise ValueError("attendu deux valeurs séparées par une virgule")
+                raise ValueError("expected two values separated by a comma")
         except ValueError as e:
-            st.warning(f"Figure size invalide — {e}")
+            st.warning(f"Figure size — {e}")
             figsize = (10, 6)
 
     dpi = 120
@@ -349,12 +356,8 @@ if uploaded_file:
         try:
             dpi = int(dpi_input)
         except ValueError:
-            st.warning("DPI invalide — valeur entière attendue.")
+            st.warning("Resolution (dpi) — an integer value is expected.")
 
-    # [FIX 1] fig est initialisé à None. L'export n'est proposé que si fig
-    # a bien été créé, c'est-à-dire quand au moins un overtone est sélectionné.
-    # Avant la correction, fig.savefig() était appelé inconditionnellement,
-    # ce qui causait un NameError si aucun overtone n'était coché.
     fig = None
 
     if not freq_selection and not diss_selection:
@@ -380,11 +383,10 @@ if uploaded_file:
         )
         st.pyplot(fig)
 
-    # [FIX 1] Export conditionnel : affiché seulement si fig existe
     st.sidebar.header("Export figure")
 
     if fig is None:
-        st.sidebar.info("Sélectionnez au moins un overtone pour activer l'export.")
+        st.sidebar.info("Select at least one overtone to enable export.")
     else:
         export_format = st.sidebar.selectbox(
             "Select export format",
