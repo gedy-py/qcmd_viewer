@@ -2,12 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
+from datetime import datetime
 from scipy.signal import savgol_filter
-from datetime import timedelta, datetime
+
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.colors as pcolors
 
 # ══════════════════════════════════════════════════
 #  Constantes
@@ -20,84 +20,87 @@ FILE_PALETTE = [
     "#A72268", "#5A8B22",
 ]
 
+# Palette qualitative pour les étapes (graphe ΔD vs Δf)
+STEP_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+]
+
 # ══════════════════════════════════════════════════
 #  Fonctions utilitaires
 # ══════════════════════════════════════════════════
 
 def seconds_to_hhmm(s):
-    s = int(s)
+    s = int(round(s))
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}"
 
-def hhmm_to_seconds(hhmm):
-    """Retourne None si vide, lève ValueError si format invalide."""
-    if not hhmm or not hhmm.strip():
+def seconds_to_hhmmss(s):
+    s = int(round(s))
+    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+def hhmm_to_seconds(clock):
+    """Accepte hh:mm ou hh:mm:ss. Retourne None si vide, lève ValueError sinon."""
+    if not clock or not str(clock).strip():
         return None
-    p = hhmm.strip().split(":")
-    if len(p) != 2:
-        raise ValueError(f"Invalid format '{hhmm}' — expected hh:mm")
+    parts = str(clock).strip().split(":")
     try:
-        return int(p[0]) * 3600 + int(p[1]) * 60
+        parts = [int(p) for p in parts]
     except ValueError:
-        raise ValueError(f"Invalid format '{hhmm}' — expected hh:mm")
+        raise ValueError(f"Invalid format '{clock}' — expected hh:mm or hh:mm:ss")
+    if len(parts) == 2:
+        return parts[0] * 3600 + parts[1] * 60
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    raise ValueError(f"Invalid format '{clock}' — expected hh:mm or hh:mm:ss")
+
+def rgb01_to_str(t):
+    """Tuple RGB 0-1 → chaîne plotly 'rgb(r,g,b)'."""
+    return f"rgb({int(t[0]*255)},{int(t[1]*255)},{int(t[2]*255)})"
 
 def make_shades(base_hex, n):
-    """Génère n teintes d'une couleur, du plus clair au plus foncé."""
+    """n teintes d'une couleur de base (clair → foncé), au format plotly."""
     if n <= 0:
         return []
-    rgb = np.array(mcolors.to_rgb(base_hex))
+    rgb = np.array(pcolors.hex_to_rgb(base_hex)) / 255.0
     if n == 1:
-        return [tuple(rgb)]
-    return [tuple(np.ones(3) * (1 - t) + rgb * t)
+        return [rgb01_to_str(rgb)]
+    return [rgb01_to_str(np.ones(3) * (1 - t) + rgb * t)
             for t in np.linspace(0.45, 1.0, n)]
 
-def get_x_axis_params(t_range_s):
-    """Retourne (locator, formatter) adapté à la durée visible — axe X adaptatif."""
-    if t_range_s <= 5 * 60:
-        return mdates.MinuteLocator(interval=1),  mdates.DateFormatter('%H:%M')
-    elif t_range_s <= 20 * 60:
-        return mdates.MinuteLocator(interval=5),  mdates.DateFormatter('%H:%M')
-    elif t_range_s <= 60 * 60:
-        return mdates.MinuteLocator(interval=10), mdates.DateFormatter('%H:%M')
-    elif t_range_s <= 3 * 3600:
-        return mdates.MinuteLocator(interval=30), mdates.DateFormatter('%H:%M')
-    elif t_range_s <= 12 * 3600:
-        return mdates.HourLocator(interval=1),    mdates.DateFormatter('%H:%M')
-    else:
-        return mdates.HourLocator(interval=2),    mdates.DateFormatter('%Hh')
+def default_scale(name, n):
+    """Échantillonne une colorscale plotly (ex: 'Blues') en n couleurs."""
+    if n <= 0:
+        return []
+    vals = np.linspace(0.5, 1.0, n) if n > 1 else [0.85]
+    return pcolors.sample_colorscale(name, list(vals))
 
-def parse_time(val, label):
-    """Helper UI : parse hh:mm → secondes, affiche un warning si invalide."""
-    if not val:
-        return None
-    try:
-        return hhmm_to_seconds(val)
-    except ValueError as e:
-        st.warning(f"{label}: {e}")
-        return None
+def time_ticks(t0, t1):
+    """Graduations adaptatives de l'axe temps (valeurs en secondes, labels hh:mm)."""
+    span = max(t1 - t0, 1)
+    if   span <= 5 * 60:    step = 60
+    elif span <= 20 * 60:   step = 5 * 60
+    elif span <= 60 * 60:   step = 10 * 60
+    elif span <= 3 * 3600:  step = 30 * 60
+    elif span <= 12 * 3600: step = 3600
+    else:                   step = 2 * 3600
+    start = (int(t0) // step) * step
+    vals = list(range(start, int(t1) + step, step))
+    return vals, [seconds_to_hhmm(v) for v in vals]
 
-def parse_limits(val, label):
-    """Helper UI : parse 'min,max' → tuple, affiche un warning si invalide."""
-    if not val:
-        return None
-    try:
-        p = val.split(",")
-        if len(p) != 2:
-            raise ValueError("expected two comma-separated values")
-        return tuple(map(float, p))
-    except ValueError as e:
-        st.warning(f"{label}: {e}")
-        return None
+def value_at(df, col, t):
+    """Valeur de col au point de données le plus proche du temps t."""
+    if col not in df.columns or len(df) == 0:
+        return np.nan
+    idx = (df["Time [s]"] - t).abs().idxmin()
+    return float(df.loc[idx, col])
 
 # ══════════════════════════════════════════════════
-#  Chargement des données
+#  Chargement & détection
 # ══════════════════════════════════════════════════
 
 @st.cache_data
 def load_cached(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Lecture et nettoyage d'un fichier QCM-D.
-    Mis en cache par contenu de fichier : un re-upload du même fichier ne le relit pas.
-    """
+    """Lecture/nettoyage d'un fichier QCM-D. Caché par contenu (pas de relecture inutile)."""
     buf = io.BytesIO(file_bytes)
     name = filename.lower()
     if name.endswith(".csv"):
@@ -107,12 +110,9 @@ def load_cached(file_bytes: bytes, filename: str) -> pd.DataFrame:
         df = pd.read_excel(buf)
     else:
         raise ValueError("Unsupported format (CSV or XLSX expected).")
-
     df.columns = [str(c).strip() for c in df.columns]
-    time_col = next(
-        (c for c in df.columns if "time" in c.lower() or "temps" in c.lower()),
-        None
-    )
+    time_col = next((c for c in df.columns
+                     if "time" in c.lower() or "temps" in c.lower()), None)
     if time_col is None:
         raise KeyError(f"No time column detected. Columns: {df.columns.tolist()}")
     df = df.rename(columns={time_col: "Time [s]"})
@@ -126,14 +126,12 @@ def detect_harmonics(df):
                  if c.startswith("D") and "[ppm]" in c])
     return fh, dh
 
-def file_metadata(df, filename):
-    """Retourne un dict lisible des métadonnées du fichier."""
+def file_metadata(df):
     t = df["Time [s]"]
-    dur = t.max() - t.min()
     dt = t.diff().median()
     fh, dh = detect_harmonics(df)
     return {
-        "Duration":      seconds_to_hhmm(dur),
+        "Duration":      seconds_to_hhmmss(t.max() - t.min()),
         "Data points":   f"{len(df):,}",
         "Sampling rate": f"~{1/dt:.2f} Hz" if dt and dt > 0 else "N/A",
         "Δf harmonics":  ", ".join(map(str, fh)) or "—",
@@ -141,306 +139,239 @@ def file_metadata(df, filename):
     }
 
 # ══════════════════════════════════════════════════
-#  Pipeline de traitement
+#  Traitement (normalisation + lissage)
 # ══════════════════════════════════════════════════
 
-def process(df, freq_sel, diss_sel,
-            t_min=None, t_max=None,
-            bl_start=None, bl_end=None,
-            normalize=False,
-            smooth=False, win=21, poly=1):
-    """
-    Pipeline dans l'ordre :
-      1. Filtrage temporel [t_min, t_max]
-      2. Correction de baseline (référence calculée sur df brut)
-      3. Normalisation Δf/n
-      4. Lissage Savitzky-Golay
-    Retourne (df_processed, effective_window, [warnings]).
-    """
+def process(df, freq_sel, diss_sel, normalize=False, smooth=False, win=21, poly=1):
+    """Applique normalisation Δf/n puis lissage Savitzky-Golay sur les colonnes utilisées."""
     d = df.copy()
     warns = []
 
-    # 1. Filtrage temporel
-    if t_min is not None:
-        d = d[d["Time [s]"] >= t_min]
-    if t_max is not None:
-        d = d[d["Time [s]"] <= t_max]
-    d = d.reset_index(drop=True)
-
-    # 2. Baseline (calculée sur le df ORIGINAL avant filtrage)
-    if bl_start is not None and bl_end is not None:
-        mask = (df["Time [s]"] >= bl_start) & (df["Time [s]"] <= bl_end)
-        ref = df[mask]
-        if len(ref) == 0:
-            warns.append("Baseline window contains no data points — correction skipped.")
-        else:
-            for n in freq_sel:
-                col = f"f{n} [Hz]"
-                if col in d.columns:
-                    d[col] = d[col] - ref[col].mean()
-            for n in diss_sel:
-                col = f"D{n} [ppm]"
-                if col in d.columns:
-                    d[col] = d[col] - ref[col].mean()
-
-    # 3. Normalisation Δf/n
     if normalize:
         for n in freq_sel:
             col = f"f{n} [Hz]"
             if col in d.columns and n != 0:
                 d[col] = d[col] / n
 
-    # 4. Lissage Savitzky-Golay (avec ajustement automatique de la fenêtre)
     n_pts = len(d)
-    eff_win = win
     if smooth and n_pts >= 3:
-        eff_win = min(win, n_pts if n_pts % 2 == 1 else n_pts - 1)
-        eff_win = max(eff_win, poly + 1)
-        if eff_win % 2 == 0:
-            eff_win -= 1
-        eff_win = max(eff_win, 3)
-        if eff_win != win:
-            warns.append(
-                f"Smoothing window adjusted from {win} to {eff_win} ({n_pts} pts in range)."
-            )
+        eff = min(win, n_pts if n_pts % 2 == 1 else n_pts - 1)
+        eff = max(eff, poly + 1)
+        if eff % 2 == 0:
+            eff -= 1
+        eff = max(eff, 3)
+        if eff != win:
+            warns.append(f"Smoothing window adjusted from {win} to {eff} ({n_pts} pts).")
         for n in freq_sel:
             col = f"f{n} [Hz]"
             if col in d.columns:
-                d[col] = savgol_filter(d[col].values, eff_win, poly)
+                d[col] = savgol_filter(d[col].values, eff, poly)
         for n in diss_sel:
             col = f"D{n} [ppm]"
             if col in d.columns:
-                d[col] = savgol_filter(d[col].values, eff_win, poly)
+                d[col] = savgol_filter(d[col].values, eff, poly)
 
-    d["Time_dt"] = [datetime(1900, 1, 1) + timedelta(seconds=float(s))
-                    for s in d["Time [s]"]]
-    return d, eff_win, warns
+    return d, warns
 
 # ══════════════════════════════════════════════════
-#  Graphe : time series
+#  Construction des figures Plotly
 # ══════════════════════════════════════════════════
 
-def plot_timeseries(plots, freq_sel, diss_sel,
-                    title="QCM-D", legend_right=False,
-                    figsize=(10, 6), dpi=120,
-                    freq_lim=None, diss_lim=None,
-                    steps=None, z_text=None,
-                    normalize=False):
-    """
-    plots : liste de dicts {df, f_color, d_color, label, custom_colors}
-    Mode fichier unique  → Blues/Reds classiques (ou couleurs custom)
-    Mode multi-fichiers  → une couleur de base par fichier, ΔD en tirets
-    """
-    if steps is None:
-        steps = []
+def build_timeseries(plots, freq_sel, diss_sel, steps, normalize,
+                     freq_lim=None, diss_lim=None, show_legend=True, title=""):
     multi = len(plots) > 1
-    has_f = bool(freq_sel)
-    has_d = bool(diss_sel)
-    linestyles = ['-', '--', '-.', ':']
-
-    fig, ax1 = plt.subplots(figsize=figsize, dpi=dpi)
-    ax1.set_xlabel("Time (hh:mm)")
-    ax2 = ax1.twinx() if (has_f and has_d) else ax1
+    has_f, has_d = bool(freq_sel), bool(diss_sel)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     for fi, p in enumerate(plots):
-        df   = p['df']
-        ls   = linestyles[fi % 4]
-        lbl  = p['label']
-
-        # Choix des couleurs selon le mode
+        df = p["df"]
+        # Choix des couleurs
         if not multi:
-            # Fichier unique : Blues/Reds sauf si couleurs custom
-            if p.get('custom_colors'):
-                sf = make_shades(p['f_color'], len(freq_sel))
-                sd = make_shades(p['d_color'], len(diss_sel))
+            if p["custom_colors"]:
+                sf = make_shades(p["f_color"], len(freq_sel))
+                sd = make_shades(p["d_color"], len(diss_sel))
             else:
-                sf = [cm.Blues(v) for v in np.linspace(0.5, 1.0, max(len(freq_sel), 1))]
-                sd = [cm.Reds(v)  for v in np.linspace(0.5, 1.0, max(len(diss_sel), 1))]
+                sf = default_scale("Blues", len(freq_sel))
+                sd = default_scale("Reds",  len(diss_sel))
         else:
-            # Multi-fichiers : shades de la couleur du fichier
-            sf = make_shades(p['color'], len(freq_sel))
-            sd = make_shades(p['color'], len(diss_sel))
+            sf = make_shades(p["color"], len(freq_sel))
+            sd = make_shades(p["color"], len(diss_sel))
 
         if has_f:
             for i, n in enumerate(freq_sel):
                 col = f"f{n} [Hz]"
                 if col not in df.columns:
                     continue
-                name = f"{'Δf/n' if normalize else 'Δf'}{n}"
-                if multi:
-                    name = f"{lbl} — {name}"
-                ax1.plot(df["Time_dt"], df[col], label=name,
-                         color=sf[i], linestyle=ls, linewidth=1.2)
+                name = f"{'Δf/n' if normalize else 'Δf'}{n}" + (f" — {p['label']}" if multi else "")
+                fig.add_trace(go.Scatter(
+                    x=df["Time [s]"], y=df[col], name=name, mode="lines",
+                    line=dict(color=sf[i], width=1.6),
+                    hovertemplate="%{customdata}<br>%{y:.3f} Hz<extra></extra>",
+                    customdata=[seconds_to_hhmmss(t) for t in df["Time [s]"]],
+                ), secondary_y=False)
 
         if has_d:
             for i, n in enumerate(diss_sel):
                 col = f"D{n} [ppm]"
                 if col not in df.columns:
                     continue
-                name = f"ΔD{n}"
-                if multi:
-                    name = f"{lbl} — {name}"
-                # En mode multi : tirets pour distinguer visuellement Δf de ΔD
-                dls = '--' if multi else ls
-                ax2.plot(df["Time_dt"], df[col], label=name,
-                         color=sd[i], linestyle=dls, linewidth=1.2, alpha=0.75)
+                name = f"ΔD{n}" + (f" — {p['label']}" if multi else "")
+                fig.add_trace(go.Scatter(
+                    x=df["Time [s]"], y=df[col], name=name, mode="lines",
+                    line=dict(color=sd[i], width=1.6, dash="dash" if multi else "solid"),
+                    opacity=0.85,
+                    hovertemplate="%{customdata}<br>%{y:.4f} ppm<extra></extra>",
+                    customdata=[seconds_to_hhmmss(t) for t in df["Time [s]"]],
+                ), secondary_y=True)
 
-    # Styles des axes
-    if has_f:
-        ax1.set_ylabel("Δf/n [Hz]" if normalize else "Frequency shift [Hz]",
-                       color="black" if multi else "#2253A2")
-        if not multi:
-            ax1.tick_params(axis='y', labelcolor='#2253A2')
-        if freq_lim:
-            ax1.set_ylim(freq_lim)
-
-    if has_d:
-        ax2.set_ylabel("Dissipation shift [ppm]",
-                       color="black" if multi else "#A71B11")
-        if not multi:
-            ax2.tick_params(axis='y', labelcolor='#A71B11')
-        if diss_lim:
-            ax2.set_ylim(diss_lim)
-
-    # Axe X adaptatif
-    all_t = [s for p in plots for s in p['df']["Time [s]"].tolist()]
-    if all_t:
-        loc, fmt = get_x_axis_params(max(all_t) - min(all_t))
-        ax1.xaxis.set_major_locator(loc)
-        ax1.xaxis.set_major_formatter(fmt)
-    plt.setp(ax1.get_xticklabels(), rotation=45)
-
-    # Légende
-    lines, lbls = ax1.get_legend_handles_labels()
-    if has_f and has_d and ax2 is not ax1:
-        l2, lb2 = ax2.get_legend_handles_labels()
-        lines += l2; lbls += lb2
-    if lines:
-        if legend_right:
-            ax1.legend(lines, lbls, loc='center left',
-                       bbox_to_anchor=(1.15, 0.5), fontsize='small')
-            plt.tight_layout(rect=[0, 0, 0.82, 1])
-        else:
-            ax1.legend(lines, lbls, loc='best', fontsize='small')
-            plt.tight_layout()
-    else:
-        plt.tight_layout()
-
-    # Steps : position Z par défaut = max de l'axe gauche (après tight_layout)
-    if z_text is None:
-        z_text = ax1.get_ylim()[1]
+    # Lignes verticales des marqueurs + noms d'étapes
+    boundaries = sorted({s["start"] for s in steps} | {s["stop"] for s in steps})
+    for b in boundaries:
+        fig.add_vline(x=b, line_dash="dot", line_width=1, line_color="gray")
     for s in steps:
-        # [FIX 5] Coordonnée X reconstruite depuis l'epoch datetime(1900,1,1)
-        sd = datetime(1900, 1, 1) + timedelta(seconds=s["start"])
-        ed = datetime(1900, 1, 1) + timedelta(seconds=s["stop"])
-        tx = datetime(1900, 1, 1) + timedelta(seconds=(s["start"] + s["stop"]) / 2)
-        ax1.axvline(sd, linestyle=':', linewidth=0.75, color='black')
-        ax1.axvline(ed, linestyle=':', linewidth=0.75, color='black')
-        ax1.text(tx, z_text, s["text"],
-                 ha='center', va='top', fontsize='small', color='black')
+        fig.add_annotation(x=(s["start"] + s["stop"]) / 2, y=1.0, yref="paper",
+                           text=s["name"], showarrow=False,
+                           font=dict(size=11, color="black"), yanchor="bottom")
 
-    plt.title(title)
+    # Axe temps adaptatif
+    all_t = [t for p in plots for t in p["df"]["Time [s]"].tolist()]
+    if all_t:
+        vals, text = time_ticks(min(all_t), max(all_t))
+        fig.update_xaxes(tickvals=vals, ticktext=text, title_text="Time (hh:mm)")
+
+    if has_f:
+        fig.update_yaxes(title_text="Δf/n [Hz]" if normalize else "Frequency shift [Hz]",
+                         secondary_y=False, color=None if multi else "#2253A2",
+                         range=list(freq_lim) if freq_lim else None)
+    if has_d:
+        fig.update_yaxes(title_text="Dissipation shift [ppm]",
+                         secondary_y=True, color=None if multi else "#A71B11",
+                         range=list(diss_lim) if diss_lim else None)
+
+    fig.update_layout(
+        title=title, showlegend=show_legend, height=520,
+        margin=dict(t=50, b=40, l=10, r=10),
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02),
+        dragmode="zoom", hovermode="closest",
+    )
+    return fig
+
+def build_ddf(plots, harmonic, steps, normalize, title=""):
+    multi = len(plots) > 1
+    fig = go.Figure()
+    fig.add_hline(y=0, line_width=0.8, line_color="lightgray")
+    fig.add_vline(x=0, line_width=0.8, line_color="lightgray")
+
+    fc, dc = f"f{harmonic} [Hz]", f"D{harmonic} [ppm]"
+
+    for fi, p in enumerate(plots):
+        df = p["df"]
+        if fc not in df.columns or dc not in df.columns:
+            continue
+        prefix = f"{p['label']} — " if multi else ""
+
+        if not steps:
+            fig.add_trace(go.Scatter(
+                x=df[fc], y=df[dc], mode="lines", name=f"{prefix}n={harmonic}",
+                line=dict(color=FILE_PALETTE[fi % len(FILE_PALETTE)] if multi else "#2253A2", width=1.6),
+            ))
+        else:
+            # Trajectoire colorée par étape
+            for si, s in enumerate(steps):
+                seg = df[(df["Time [s]"] >= s["start"]) & (df["Time [s]"] <= s["stop"])]
+                if len(seg) == 0:
+                    continue
+                color = STEP_PALETTE[si % len(STEP_PALETTE)]
+                fig.add_trace(go.Scatter(
+                    x=seg[fc], y=seg[dc], mode="lines",
+                    name=f"{prefix}{s['name']}",
+                    line=dict(color=color, width=1.8),
+                ))
+            # Gros points aux transitions
+            for b in sorted({s["start"] for s in steps} | {s["stop"] for s in steps}):
+                fig.add_trace(go.Scatter(
+                    x=[value_at(df, fc, b)], y=[value_at(df, dc, b)],
+                    mode="markers", showlegend=False,
+                    marker=dict(size=11, color="black", symbol="circle-open", line=dict(width=2)),
+                    hovertemplate=f"transition @ {seconds_to_hhmmss(b)}<extra></extra>",
+                ))
+
+    fig.update_xaxes(title_text="Δf/n [Hz]" if normalize else "Δf [Hz]")
+    fig.update_yaxes(title_text="ΔD [ppm]")
+    fig.update_layout(title=title, height=520, margin=dict(t=50, b=40, l=10, r=10),
+                      legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02))
     return fig
 
 # ══════════════════════════════════════════════════
-#  Graphe : ΔD vs Δf
+#  Tableau des étapes (étapes en colonnes, propriétés en lignes)
 # ══════════════════════════════════════════════════
 
-def plot_dd_vs_df(plots, freq_sel, diss_sel,
-                  title="ΔD vs Δf", figsize=(7, 6), dpi=120, normalize=False):
-    """
-    Graphe paramétrique (couleur = progression temporelle via gradient sur la ligne).
-    Seuls les harmoniques présents à la fois dans freq_sel et diss_sel sont tracés.
-    """
-    common_n = [n for n in freq_sel if n in diss_sel]
-    if not common_n:
+def step_table(plots, steps, freq_sel, diss_sel, normalize):
+    multi = len(plots) > 1
+    if not steps:
         return None
 
-    multi = len(plots) > 1
-    linestyles = ['-', '--', '-.', ':']
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    ax.set_xlabel("Δf/n [Hz]" if normalize else "Δf [Hz]")
-    ax.set_ylabel("ΔD [ppm]")
-    ax.axhline(0, color='lightgray', linewidth=0.8, zorder=0)
-    ax.axvline(0, color='lightgray', linewidth=0.8, zorder=0)
-
-    start_legend_added = end_legend_added = False
-    for fi, p in enumerate(plots):
-        df = p['df']
-        shades = make_shades(p['color'] if multi else "#2253A2", len(common_n))
-        ls = linestyles[fi % 4]
-        for i, n in enumerate(common_n):
-            fc, dc = f"f{n} [Hz]", f"D{n} [ppm]"
-            if fc not in df.columns or dc not in df.columns:
-                continue
-            x, y = df[fc].values, df[dc].values
-            name = f"n={n}" + (f" — {p['label']}" if multi else "")
-            ax.plot(x, y, color=shades[i], linestyle=ls, linewidth=1.2, label=name)
-            # Marqueurs début (○) et fin (■) : ajoutés une seule fois dans la légende
-            slbl = "start" if not start_legend_added else ""
-            elbl = "end"   if not end_legend_added   else ""
-            ax.plot(x[0],  y[0],  'o', color=shades[i], markersize=5, label=slbl)
-            ax.plot(x[-1], y[-1], 's', color=shades[i], markersize=5, label=elbl)
-            start_legend_added = end_legend_added = True
-
-    handles, labels = ax.get_legend_handles_labels()
-    filtered = [(h, l) for h, l in zip(handles, labels) if l]
-    if filtered:
-        ax.legend(*zip(*filtered), fontsize='small')
-    plt.title(title)
-    plt.tight_layout()
-    return fig
-
-# ══════════════════════════════════════════════════
-#  Analyse Δ
-# ══════════════════════════════════════════════════
-
-def compute_delta(raw_dfs_list, labels, freq_sel, diss_sel,
-                  t1, t2, half_win, normalize,
-                  bl_start=None, bl_end=None):
-    """
-    Calcule la valeur moyenne dans [Ti - half_win, Ti + half_win] pour T1 et T2,
-    sur les données BRUTES re-traitées (baseline + normalisation, sans filtrage temporel).
-    Retourne une liste de dicts (lignes du tableau).
-    """
-    rows = []
-    for df_raw, label in zip(raw_dfs_list, labels):
-        # Re-traitement sans filtrage temporel pour avoir accès à T1/T2 hors fenêtre
-        d, _, _ = process(df_raw, freq_sel, diss_sel,
-                          t_min=None, t_max=None,
-                          bl_start=bl_start, bl_end=bl_end,
-                          normalize=normalize,
-                          smooth=False)
-        m1 = (d["Time [s]"] >= t1 - half_win) & (d["Time [s]"] <= t1 + half_win)
-        m2 = (d["Time [s]"] >= t2 - half_win) & (d["Time [s]"] <= t2 + half_win)
-        d1, d2 = d[m1], d[m2]
-
+    # Ordre des lignes
+    row_order = ["Name", "Start", "End", "Duration"]
+    for p in plots:
+        lab = f" ({p['label']})" if multi else ""
         for n in freq_sel:
-            fc  = f"f{n} [Hz]"
-            dcc = f"D{n} [ppm]"
-            if fc not in d.columns:
-                continue
+            if f"f{n} [Hz]" in p["df"].columns:
+                row_order.append(f"Δ{'f/n' if normalize else 'f'}{n} [Hz]{lab}")
+        for n in diss_sel:
+            if f"D{n} [ppm]" in p["df"].columns:
+                row_order.append(f"ΔD{n} [ppm]{lab}")
 
-            f1 = d1[fc].mean() if len(d1) else np.nan
-            f2 = d2[fc].mean() if len(d2) else np.nan
-            v1 = d1[dcc].mean() if (dcc in d.columns and len(d1)) else np.nan
-            v2 = d2[dcc].mean() if (dcc in d.columns and len(d2)) else np.nan
+    data = {}
+    for i, s in enumerate(steps):
+        col = f"Step {i+1}"
+        d = {
+            "Name":     s["name"] or f"Step {i+1}",
+            "Start":    seconds_to_hhmmss(s["start"]),
+            "End":      seconds_to_hhmmss(s["stop"]),
+            "Duration": seconds_to_hhmmss(s["stop"] - s["start"]),
+        }
+        for p in plots:
+            df = p["df"]
+            lab = f" ({p['label']})" if multi else ""
+            for n in freq_sel:
+                fcol = f"f{n} [Hz]"
+                if fcol in df.columns:
+                    v = value_at(df, fcol, s["stop"]) - value_at(df, fcol, s["start"])
+                    d[f"Δ{'f/n' if normalize else 'f'}{n} [Hz]{lab}"] = round(v, 4)
+            for n in diss_sel:
+                dcol = f"D{n} [ppm]"
+                if dcol in df.columns:
+                    v = value_at(df, dcol, s["stop"]) - value_at(df, dcol, s["start"])
+                    d[f"ΔD{n} [ppm]{lab}"] = round(v, 6)
+        data[col] = d
 
-            def fmt(v, decimals=4):
-                return f"{v:.{decimals}f}" if not np.isnan(v) else "—"
+    return pd.DataFrame(data).reindex(row_order)
 
-            fl = "Δf/n [Hz]" if normalize else "Δf [Hz]"
-            rows.append({
-                "File":              label,
-                "n":                 n,
-                f"{fl} @ T1":        fmt(f1),
-                f"{fl} @ T2":        fmt(f2),
-                f"Δ({fl})":          fmt(f2 - f1) if not (np.isnan(f1) or np.isnan(f2)) else "—",
-                "ΔD [ppm] @ T1":     fmt(v1, 6),
-                "ΔD [ppm] @ T2":     fmt(v2, 6),
-                "Δ(ΔD) [ppm]":       fmt(v2 - v1, 6) if not (np.isnan(v1) or np.isnan(v2)) else "—",
-            })
-    return rows
+# ══════════════════════════════════════════════════
+#  Helpers session_state pour les marqueurs
+# ══════════════════════════════════════════════════
+
+def add_marker(t):
+    st.session_state.marker_counter += 1
+    idx = st.session_state.marker_counter
+    st.session_state.markers.append(
+        {"id": idx, "time": float(t), "name": f"Step {len(st.session_state.markers)+1}"}
+    )
+
+def sorted_steps():
+    ms = sorted(st.session_state.markers, key=lambda m: m["time"])
+    steps = []
+    for i in range(len(ms) - 1):
+        steps.append({"name": ms[i]["name"], "start": ms[i]["time"], "stop": ms[i+1]["time"]})
+    return steps
+
+def plotly_png_bytes(fig, fmt="png", scale=2):
+    """Export serveur via kaleido. Retourne None si indisponible."""
+    try:
+        return fig.to_image(format=fmt, scale=scale)
+    except Exception:
+        return None
 
 # ══════════════════════════════════════════════════
 #  Interface Streamlit
@@ -449,373 +380,271 @@ def compute_delta(raw_dfs_list, labels, freq_sel, diss_sel,
 st.set_page_config(page_title="QCM-D Viewer", layout="wide")
 st.markdown("""
     <style>
-    .block-container { padding-top: 1rem; padding-bottom: 0rem; }
-    div[data-testid="stSidebarContent"] { padding-top: 1rem; }
+    .block-container { padding-top: 1.2rem; }
     </style>
 """, unsafe_allow_html=True)
 
-# ── Initialisation session state ─────────────────
-if "reset_count" not in st.session_state:
-    st.session_state.reset_count = 0
-if "file_settings" not in st.session_state:
-    st.session_state.file_settings = {}
+# Session state
+st.session_state.setdefault("markers", [])
+st.session_state.setdefault("marker_counter", 0)
+st.session_state.setdefault("file_settings", {})
 
-# rc = suffixe pour tous les widgets d'analyse.
-# Changer rc (via Reset) force la recréation de ces widgets avec leurs valeurs par défaut.
-rc = st.session_state.reset_count
-
-# ── Titre ─────────────────────────────────────────
 st.title("QCM-D Viewer")
 st.markdown(
     '<p style="margin-top:-10px; color:gray; font-size:0.9em; font-style:italic;">'
-    '📂 GitHub & sample data : '
-    '<a href="https://github.com/gedy-py/qcmd_viewer" target="_blank">'
-    'github.com/gedy-py/qcmd_viewer</a></p>',
+    '📂 <a href="https://github.com/gedy-py/qcmd_viewer" target="_blank">github.com/gedy-py/qcmd_viewer</a></p>',
     unsafe_allow_html=True
 )
 
-# ══════════════════════════════════════════════════
-#  SIDEBAR
-# ══════════════════════════════════════════════════
-
+# ── Sidebar : upload + options globales ───────────
 st.sidebar.header("📂 Files")
 uploaded_files = st.sidebar.file_uploader(
-    "Upload CSV/Excel file(s)", type=["csv", "xlsx"],
-    accept_multiple_files=True
+    "Upload CSV/Excel file(s)", type=["csv", "xlsx"], accept_multiple_files=True
 )
 
 if not uploaded_files:
-    st.info("⬆️ Upload one or more QCM-D files to get started.")
+    st.info("⬆️ Upload one or more QCM-D files in the sidebar to get started.")
     st.stop()
 
-# Chargement (avec cache : pas de relecture si le fichier n'a pas changé)
 raw_dfs = {}
 for uf in uploaded_files:
     try:
         raw_dfs[uf.name] = load_cached(uf.getvalue(), uf.name)
     except Exception as e:
         st.sidebar.error(f"**{uf.name}**: {e}")
-
 if not raw_dfs:
     st.stop()
 
-# Union de tous les harmoniques détectés dans l'ensemble des fichiers
 all_fh = sorted({n for df in raw_dfs.values() for n in detect_harmonics(df)[0]})
 all_dh = sorted({n for df in raw_dfs.values() for n in detect_harmonics(df)[1]})
 is_multi = len(raw_dfs) > 1
-
-# ── Paramètres par fichier (label, couleur, activé) ──
-st.sidebar.markdown("**Files loaded:**")
-for idx, fname in enumerate(raw_dfs):
-    # Initialisation des settings par défaut lors du premier chargement
-    if fname not in st.session_state.file_settings:
-        st.session_state.file_settings[fname] = {
-            "label":         fname.rsplit(".", 1)[0],
-            "color":         FILE_PALETTE[idx % len(FILE_PALETTE)],
-            "f_color":       "#2253A2",
-            "d_color":       "#A71B11",
-            "custom_colors": False,
-            "enabled":       True,
-        }
-    fs = st.session_state.file_settings[fname]
-
-    with st.sidebar.expander(f"{'✅' if fs['enabled'] else '⬜'} {fname}", expanded=False):
-        fs["enabled"] = st.checkbox("Include in plot", value=fs["enabled"],
-                                     key=f"en_{fname}")
-        fs["label"] = st.text_input("Display label", value=fs["label"],
-                                     key=f"lbl_{fname}")
-
-        # Métadonnées
-        for k, v in file_metadata(raw_dfs[fname], fname).items():
-            st.caption(f"**{k}:** {v}")
-
-        st.divider()
-        # Options de couleur : deux modes selon contexte
-        if is_multi:
-            fs["custom_colors"] = st.checkbox("Custom color", value=fs["custom_colors"],
-                                               key=f"cc_{fname}")
-            if fs["custom_colors"]:
-                fs["color"] = st.color_picker("File color", value=fs["color"],
-                                               key=f"cp_{fname}")
-            else:
-                fs["color"] = FILE_PALETTE[idx % len(FILE_PALETTE)]
-                st.caption(f"Auto color: {fs['color']}")
-        else:
-            # Fichier unique : deux color pickers (Δf / ΔD)
-            fs["custom_colors"] = st.checkbox("Custom colors", value=fs["custom_colors"],
-                                               key=f"cc_{fname}")
-            if fs["custom_colors"]:
-                c1, c2 = st.columns(2)
-                fs["f_color"] = c1.color_picker("Δf", value=fs["f_color"], key=f"fc_{fname}")
-                fs["d_color"] = c2.color_picker("ΔD", value=fs["d_color"], key=f"dc_{fname}")
-            else:
-                st.caption("Auto: Blues for Δf, Reds for ΔD")
-
-# Fichiers actifs
-active = {fn: raw_dfs[fn] for fn in raw_dfs
-          if st.session_state.file_settings.get(fn, {}).get("enabled", True)}
-if not active:
-    st.warning("No file is enabled. Enable at least one in the sidebar.")
-    st.stop()
-
-# ── Sélection des harmoniques ─────────────────────
-st.sidebar.header("🎵 Overtones")
 default_order = [7, 5, 3, 9, 11, 13, 1]
 
-with st.sidebar.expander("Frequency shift (Δf)", expanded=False):
-    default_f = next((h for h in default_order if h in all_fh), None)
+st.sidebar.header("🎵 Overtones")
+with st.sidebar.expander("Frequency shift (Δf)", expanded=True):
+    df_def = next((h for h in default_order if h in all_fh), None)
     freq_sel = []
-    cols = st.columns(3)
+    cc = st.columns(3)
     for i, n in enumerate(all_fh):
-        if cols[i % 3].checkbox(f"f{n}", value=(n == default_f), key=f"f{n}_{rc}"):
+        if cc[i % 3].checkbox(f"f{n}", value=(n == df_def), key=f"f{n}"):
             freq_sel.append(n)
 
-with st.sidebar.expander("Dissipation shift (ΔD)", expanded=False):
-    default_d = next((h for h in default_order if h in all_dh), None)
+with st.sidebar.expander("Dissipation shift (ΔD)", expanded=True):
+    dd_def = next((h for h in default_order if h in all_dh), None)
     diss_sel = []
-    cols = st.columns(3)
+    cc = st.columns(3)
     for i, n in enumerate(all_dh):
-        if cols[i % 3].checkbox(f"D{n}", value=(n == default_d), key=f"D{n}_{rc}"):
+        if cc[i % 3].checkbox(f"D{n}", value=(n == dd_def), key=f"D{n}"):
             diss_sel.append(n)
 
-# ── Options ───────────────────────────────────────
-st.sidebar.header("⚙️ Options")
-graph_title = st.sidebar.text_input("Plot title", value="QCM-D", key=f"title_{rc}")
-
-with st.sidebar.expander("⏱ Time window"):
-    t_min_in = st.text_input("Start time", "", placeholder="hh:mm", key=f"tmin_{rc}")
-    t_max_in = st.text_input("End time",   "", placeholder="hh:mm", key=f"tmax_{rc}")
-
-with st.sidebar.expander("🔬 Processing"):
-    normalize = st.checkbox(
-        "Normalize Δf/n", value=False, key=f"norm_{rc}",
-        help="Divides each frequency shift by its harmonic number n (Sauerbrey analysis)."
-    )
-    do_baseline = st.checkbox(
-        "Baseline correction", value=False, key=f"bl_{rc}",
-        help="Subtracts the mean value of each channel over a reference time window."
-    )
-    bl_start_in = bl_end_in = ""
-    if do_baseline:
-        st.caption("Reference window (applied on raw data):")
-        c1, c2 = st.columns(2)
-        bl_start_in = c1.text_input("Start", "", placeholder="hh:mm", key=f"bls_{rc}")
-        bl_end_in   = c2.text_input("End",   "", placeholder="hh:mm", key=f"ble_{rc}")
-
-with st.sidebar.expander("📐 Axes & Legend"):
-    freq_lim_in = st.text_input("Δf limits", "", placeholder="min,max", key=f"flim_{rc}")
-    diss_lim_in = st.text_input("ΔD limits", "", placeholder="min,max", key=f"dlim_{rc}")
-    legend_right = st.checkbox("Legend outside plot", value=False, key=f"leg_{rc}")
-
-with st.sidebar.expander("🧪 Experimental steps"):
-    add_steps = st.checkbox("Add steps", key=f"addstep_{rc}")
-    steps  = []
-    z_text = None
-    if add_steps:
-        n_steps = st.number_input("Number of steps", 1, 10, 1, key=f"nstep_{rc}")
-        for i in range(int(n_steps)):
-            with st.expander(f"Step {i+1}"):
-                stxt = st.text_input("Name", "", key=f"stxt_{i}_{rc}")
-                c1, c2 = st.columns(2)
-                ss = c1.text_input("Start", "", placeholder="hh:mm", key=f"ss_{i}_{rc}")
-                se = c2.text_input("Stop",  "", placeholder="hh:mm", key=f"se_{i}_{rc}")
-                try:    ss_s = hhmm_to_seconds(ss) or 0
-                except: ss_s = 0
-                try:    se_s = hhmm_to_seconds(se) or ss_s + 1
-                except: se_s = ss_s + 1
-                steps.append({"text": stxt, "start": ss_s, "stop": se_s})
-
-        z_in = st.text_input("Label Y position", "", placeholder="default: top of left axis",
-                              key=f"zin_{rc}")
-        if z_in:
-            try:
-                z_text = float(z_in)
-            except ValueError:
-                st.warning("Y position — numeric value expected.")
-
-        # Avertissement sur l'axe de référence de z_text
-        if freq_sel and diss_sel:
-            st.info("ℹ️ Y position is in **Hz** (left axis: Δf). Switching to ΔD-only changes unit to ppm.")
-        elif diss_sel and not freq_sel:
-            st.info("ℹ️ Y position is in **ppm** (left axis: ΔD).")
-
-with st.sidebar.expander("〰️ Smoothing"):
-    smooth  = st.checkbox("Savitzky-Golay", value=False, key=f"sm_{rc}")
-    win_len = st.slider("Window length", 3, 101, 21, step=2, key=f"wl_{rc}")
-    poly    = st.slider("Polyorder", 1, 5, 1, key=f"po_{rc}")
-
-with st.sidebar.expander("🖼 Figure size"):
-    fsz_in = st.text_input("Width, height (inches)", "", placeholder="10,6",  key=f"fsz_{rc}")
-    dpi_in = st.text_input("Resolution (dpi)",       "", placeholder="120",   key=f"dpi_{rc}")
-
-st.sidebar.divider()
-if st.sidebar.button("🔄 Reset analysis settings", key="reset_btn",
-                     help="Resets all options to default. File labels and colors are preserved."):
-    st.session_state.reset_count += 1
-    st.rerun()
-
-# ── Parsing des entrées ───────────────────────────
-t_min    = parse_time(t_min_in,    "Start time")
-t_max    = parse_time(t_max_in,    "End time")
-bl_start = parse_time(bl_start_in, "Baseline start") if do_baseline else None
-bl_end   = parse_time(bl_end_in,   "Baseline end")   if do_baseline else None
-freq_lim = parse_limits(freq_lim_in, "Δf limits")
-diss_lim = parse_limits(diss_lim_in, "ΔD limits")
-
-try:
-    figsize = tuple(map(float, fsz_in.split(","))) if fsz_in else (10, 6)
-    if len(figsize) != 2:
-        raise ValueError()
-except Exception:
-    st.warning("Figure size: expected width,height (e.g. 10,6)")
-    figsize = (10, 6)
-
-try:
-    dpi = int(dpi_in) if dpi_in else 120
-except ValueError:
-    st.warning("DPI: integer expected.")
-    dpi = 120
+st.sidebar.header("🔬 Processing")
+normalize = st.sidebar.checkbox("Normalize Δf/n", value=False,
+                                help="Divides each frequency shift by its harmonic number n.")
+smooth = st.sidebar.checkbox("Smoothing (Savitzky-Golay)", value=False)
+win_len = st.sidebar.slider("Window length", 3, 101, 21, step=2, disabled=not smooth)
+poly = st.sidebar.slider("Polyorder", 1, 5, 1, disabled=not smooth)
 
 if not freq_sel and not diss_sel:
-    st.warning("⚠️ Select at least one overtone (Δf or ΔD) to display.")
+    st.warning("⚠️ Select at least one overtone (Δf or ΔD) in the sidebar.")
     st.stop()
 
-# ── Traitement de chaque fichier actif ───────────
-plots = []
-all_warnings = []
+# Initialisation des settings par fichier
+for idx, fname in enumerate(raw_dfs):
+    if fname not in st.session_state.file_settings:
+        st.session_state.file_settings[fname] = {
+            "label": fname.rsplit(".", 1)[0],
+            "color": FILE_PALETTE[idx % len(FILE_PALETTE)],
+            "f_color": "#2253A2", "d_color": "#A71B11",
+            "custom_colors": False, "enabled": True,
+        }
 
-for fname, df_raw in active.items():
+# ── Traitement des fichiers actifs ────────────────
+plots, warns = [], []
+for idx, (fname, df_raw) in enumerate(raw_dfs.items()):
     fs = st.session_state.file_settings[fname]
-    df_proc, _, warns = process(
-        df_raw, freq_sel, diss_sel,
-        t_min=t_min, t_max=t_max,
-        bl_start=bl_start, bl_end=bl_end,
-        normalize=normalize,
-        smooth=smooth, win=win_len, poly=poly
-    )
-    for w in warns:
-        all_warnings.append(f"**{fname}**: {w}")
-    plots.append({
-        "df":            df_proc,
-        "df_raw":        df_raw,
-        "color":         fs["color"],
-        "f_color":       fs["f_color"],
-        "d_color":       fs["d_color"],
-        "custom_colors": fs["custom_colors"],
-        "label":         fs["label"],
-        "fname":         fname,
-    })
+    if not fs["enabled"]:
+        continue
+    d, w = process(df_raw, freq_sel, diss_sel, normalize, smooth, win_len, poly)
+    warns += [f"**{fname}**: {x}" for x in w]
+    plots.append({**fs, "df": d, "df_raw": df_raw, "fname": fname})
 
-for w in all_warnings:
+for w in warns:
     st.warning(w)
+if not plots:
+    st.warning("No file enabled. Enable at least one in the Data tab.")
 
 # ══════════════════════════════════════════════════
-#  ONGLETS PRINCIPAUX
+#  ONGLETS
 # ══════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Time series",
-    "🔄 ΔD vs Δf",
-    "📊 Δ Analysis",
-    "💾 Export",
-])
+tab_data, tab_ts, tab_ddf = st.tabs(["📂 Data", "📈 Time Series", "🔄 ΔD vs Δf"])
 
-# ── Onglet 1 : Time series ────────────────────────
-with tab1:
-    fig_ts = plot_timeseries(
-        plots, freq_sel, diss_sel,
-        title=graph_title,
-        legend_right=legend_right,
-        figsize=figsize, dpi=dpi,
-        freq_lim=freq_lim, diss_lim=diss_lim,
-        steps=steps, z_text=z_text,
-        normalize=normalize,
-    )
-    st.pyplot(fig_ts)
+# ─── Onglet Data ──────────────────────────────────
+with tab_data:
+    st.subheader("Files & appearance")
+    for idx, fname in enumerate(raw_dfs):
+        fs = st.session_state.file_settings[fname]
+        with st.expander(f"{'✅' if fs['enabled'] else '⬜'} {fname}", expanded=(len(raw_dfs) == 1)):
+            ca, cb = st.columns([1, 2])
+            fs["enabled"] = ca.checkbox("Include", value=fs["enabled"], key=f"en_{fname}")
+            fs["label"] = cb.text_input("Label", value=fs["label"], key=f"lbl_{fname}")
 
-# ── Onglet 2 : ΔD vs Δf ──────────────────────────
-with tab2:
+            meta = file_metadata(raw_dfs[fname])
+            mc = st.columns(len(meta))
+            for (k, v), c in zip(meta.items(), mc):
+                c.metric(k, v)
+
+            st.divider()
+            if is_multi:
+                fs["custom_colors"] = st.checkbox("Custom color", value=fs["custom_colors"], key=f"cc_{fname}")
+                if fs["custom_colors"]:
+                    fs["color"] = st.color_picker("File color", value=fs["color"], key=f"cp_{fname}")
+                else:
+                    fs["color"] = FILE_PALETTE[idx % len(FILE_PALETTE)]
+                    st.caption(f"Auto color: {fs['color']}")
+            else:
+                fs["custom_colors"] = st.checkbox("Custom colors", value=fs["custom_colors"], key=f"cc_{fname}")
+                if fs["custom_colors"]:
+                    c1, c2 = st.columns(2)
+                    fs["f_color"] = c1.color_picker("Δf", value=fs["f_color"], key=f"fc_{fname}")
+                    fs["d_color"] = c2.color_picker("ΔD", value=fs["d_color"], key=f"dc_{fname}")
+                else:
+                    st.caption("Auto: Blues for Δf, Reds for ΔD")
+
+# ─── Onglet Time Series ───────────────────────────
+with tab_ts:
+    if not plots:
+        st.stop()
+
+    steps = sorted_steps()
+
+    opt1, opt2, opt3 = st.columns([2, 2, 1])
+    flim_in = opt1.text_input("Δf axis limits", "", placeholder="min,max")
+    dlim_in = opt2.text_input("ΔD axis limits", "", placeholder="min,max")
+    show_leg = opt3.checkbox("Legend", value=True)
+
+    def _lim(v):
+        try:
+            p = v.split(",")
+            return (float(p[0]), float(p[1])) if len(p) == 2 else None
+        except Exception:
+            return None
+    freq_lim, diss_lim = _lim(flim_in), _lim(dlim_in)
+
+    fig_ts = build_timeseries(plots, freq_sel, diss_sel, steps, normalize,
+                              freq_lim, diss_lim, show_leg)
+
+    event = st.plotly_chart(fig_ts, use_container_width=True,
+                            on_select="rerun", selection_mode="points", key="ts_chart")
+
+    # Récupération du clic
+    clicked_x = None
+    try:
+        pts = event["selection"]["points"]
+        if pts:
+            clicked_x = pts[0]["x"]
+    except Exception:
+        clicked_x = None
+
+    st.markdown("##### Markers")
+    cc1, cc2 = st.columns([3, 1])
+    if clicked_x is not None:
+        cc1.success(f"Selected on chart: **{seconds_to_hhmmss(clicked_x)}**")
+        if cc2.button("➕ Add marker", use_container_width=True):
+            add_marker(clicked_x)
+            st.rerun()
+    else:
+        cc1.caption("Click a point on a curve to pick a time, then **Add marker**. Or add manually below.")
+
+    mc1, mc2, mc3 = st.columns([3, 1, 1])
+    man_t = mc1.text_input("Manual time (hh:mm or hh:mm:ss)", "", key="man_t", label_visibility="collapsed",
+                           placeholder="hh:mm:ss")
+    if mc2.button("➕ Add manual", use_container_width=True):
+        try:
+            t = hhmm_to_seconds(man_t)
+            if t is not None:
+                add_marker(t)
+                st.rerun()
+        except ValueError as e:
+            st.warning(str(e))
+    if mc3.button("🗑️ Clear all", use_container_width=True):
+        st.session_state.markers = []
+        st.rerun()
+
+    # Liste éditable des marqueurs (indépendants)
+    if st.session_state.markers:
+        st.caption("Each marker is editable independently. Steps are the intervals between "
+                   "chronologically-sorted markers (N markers → N-1 steps).")
+        for m in list(st.session_state.markers):
+            e1, e2, e3 = st.columns([2, 2, 1])
+            new_name = e1.text_input("Name", value=m["name"], key=f"mn_{m['id']}")
+            new_time = e2.text_input("Time", value=seconds_to_hhmmss(m["time"]), key=f"mt_{m['id']}")
+            m["name"] = new_name
+            try:
+                tt = hhmm_to_seconds(new_time)
+                if tt is not None:
+                    m["time"] = float(tt)
+            except ValueError:
+                e2.warning("hh:mm[:ss]")
+            if e3.button("🗑️", key=f"md_{m['id']}"):
+                st.session_state.markers = [x for x in st.session_state.markers if x["id"] != m["id"]]
+                st.rerun()
+
+    # Tableau des étapes
+    steps = sorted_steps()
+    if steps:
+        st.markdown("##### Step table (Δ)")
+        tbl = step_table(plots, steps, freq_sel, diss_sel, normalize)
+        st.dataframe(tbl, use_container_width=True)
+    else:
+        st.info("Add at least two markers to define a step.")
+
+    # Exports
+    st.markdown("##### Export")
+    ec1, ec2, ec3 = st.columns(3)
+    fmt = ec1.selectbox("Figure format", ["png", "svg", "pdf"], key="ts_fmt")
+    img = plotly_png_bytes(fig_ts, fmt)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if img:
+        ec2.download_button(f"💾 Figure (.{fmt})", data=img,
+                            file_name=f"qcmd_timeseries_{ts}.{fmt}",
+                            mime=f"image/{fmt}" if fmt != "pdf" else "application/pdf",
+                            use_container_width=True)
+    else:
+        ec2.caption("Server export unavailable — use the 📷 camera icon in the chart toolbar.")
+    if steps:
+        csv = step_table(plots, steps, freq_sel, diss_sel, normalize).to_csv().encode("utf-8")
+        ec3.download_button("📋 Step table (CSV)", data=csv,
+                            file_name=f"qcmd_steps_{ts}.csv", mime="text/csv",
+                            use_container_width=True)
+
+# ─── Onglet ΔD vs Δf ──────────────────────────────
+with tab_ddf:
+    if not plots:
+        st.stop()
     common_n = [n for n in freq_sel if n in diss_sel]
     if not common_n:
-        st.info("ℹ️ Select at least one harmonic present in **both** Δf and ΔD to display this plot.")
+        st.info("ℹ️ Select at least one harmonic present in **both** Δf and ΔD (sidebar) to plot ΔD vs Δf.")
     else:
-        fig_ddf = plot_dd_vs_df(
-            plots, freq_sel, diss_sel,
-            title=f"ΔD vs Δf — {graph_title}",
-            figsize=(min(figsize[0], 8), figsize[1]),
-            dpi=dpi,
-            normalize=normalize,
-        )
-        if fig_ddf:
-            st.pyplot(fig_ddf)
-            st.caption("**○** = start of measurement  |  **■** = end of measurement")
-
-# ── Onglet 3 : Analyse Δ ─────────────────────────
-with tab3:
-    st.subheader("Δ Analysis between two time points")
-    st.caption(
-        "The mean value is computed in a window **[T ± W]** around each time point. "
-        "Baseline correction and normalization (if enabled) are applied."
-    )
-
-    ca, cb, cc = st.columns(3)
-    dt1_in   = ca.text_input("T1", "", placeholder="hh:mm", key=f"dt1_{rc}")
-    dt2_in   = cb.text_input("T2", "", placeholder="hh:mm", key=f"dt2_{rc}")
-    half_win = cc.number_input("Window ± W (s)", min_value=1, max_value=600,
-                                value=30, key=f"hw_{rc}")
-
-    delta_t1 = parse_time(dt1_in, "T1")
-    delta_t2 = parse_time(dt2_in, "T2")
-
-    if delta_t1 is not None and delta_t2 is not None:
-        if delta_t1 >= delta_t2:
-            st.warning("T1 must be strictly before T2.")
+        harmonic = st.selectbox("Harmonic", common_n,
+                                format_func=lambda n: f"n = {n}", key="ddf_n")
+        steps = sorted_steps()
+        fig_ddf = build_ddf(plots, harmonic, steps, normalize,
+                            title=f"ΔD vs Δf — n={harmonic}")
+        st.plotly_chart(fig_ddf, use_container_width=True, key="ddf_chart")
+        if steps:
+            st.caption("Line color = step (see legend). ○ = transition between steps.")
         else:
-            rows = compute_delta(
-                [p['df_raw'] for p in plots],
-                [p['label']  for p in plots],
-                freq_sel, diss_sel,
-                delta_t1, delta_t2, half_win,
-                normalize=normalize,
-                bl_start=bl_start, bl_end=bl_end,
-            )
-            if rows:
-                df_delta = pd.DataFrame(rows)
-                st.dataframe(df_delta, use_container_width=True, hide_index=True)
-                csv_delta = df_delta.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "⬇️ Download delta table (CSV)", data=csv_delta,
-                    file_name="delta_analysis.csv", mime="text/csv"
-                )
-            else:
-                st.warning("No data found around T1 or T2 — check time values and window size.")
-    else:
-        st.info("Enter T1 and T2 to compute Δ values.")
+            st.caption("Add markers in the Time Series tab to color the trajectory by step.")
 
-# ── Onglet 4 : Export ─────────────────────────────
-with tab4:
-    col_fig, col_csv = st.columns(2)
-
-    with col_fig:
-        st.subheader("Export figure")
-        exp_fmt = st.selectbox("Format", ["PNG", "PDF", "SVG", "JPG", "EPS"])
-        buf = io.BytesIO()
-        fig_ts.savefig(buf, format=exp_fmt.lower(), dpi=dpi, bbox_inches="tight")
-        buf.seek(0)
+        ec1, ec2 = st.columns(2)
+        fmt2 = ec1.selectbox("Figure format", ["png", "svg", "pdf"], key="ddf_fmt")
+        img2 = plotly_png_bytes(fig_ddf, fmt2)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            f"💾 Download ({exp_fmt})", data=buf,
-            file_name=f"{graph_title or 'qcmd'}_{ts}.{exp_fmt.lower()}",
-            mime=f"image/{'jpeg' if exp_fmt == 'JPG' else exp_fmt.lower()}"
-        )
-
-    with col_csv:
-        st.subheader("Export processed data")
-        for p in plots:
-            df_exp = p['df'].drop(columns=["Time_dt"], errors="ignore")
-            csv_b = df_exp.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                f"⬇️ {p['label']} (CSV)", data=csv_b,
-                file_name=f"{p['label']}_processed.csv",
-                mime="text/csv", key=f"csv_{p['fname']}"
-            )
+        if img2:
+            ec2.download_button(f"💾 Figure (.{fmt2})", data=img2,
+                                file_name=f"qcmd_ddf_n{harmonic}_{ts}.{fmt2}",
+                                mime=f"image/{fmt2}" if fmt2 != "pdf" else "application/pdf",
+                                use_container_width=True)
+        else:
+            ec2.caption("Server export unavailable — use the 📷 camera icon in the chart toolbar.")
